@@ -258,6 +258,8 @@ details.fixes summary{cursor:pointer;font-weight:700}
 .speed{display:flex;align-items:center;gap:6px}
 .speed .seg button{padding:4px 8px;font-size:.76rem}
 .status .pill{font-size:.7rem;padding:3px 8px}
+.pillbtn{border:0;cursor:pointer;font-weight:400}
+.pillbtn:hover{outline:1px solid currentColor}
 @media (max-width:640px){.brand .name{display:none}}
 /* conversar por voz */
 .talkmode{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -1290,7 +1292,7 @@ function listenHTML(st){
   if(!p||!p.listen) return `<section class="card stack" id="listen"><h2>Escucha</h2>
     <p class="muted" style="max-width:68ch">En esta unidad, la comprensión auditiva, el dictado y las frases de pronunciación los prepara el tutor IA a partir de lo que enseñó la lección. Se generan una sola vez y quedan guardados.</p>
     ${st.perr?`<p class="errtxt">${esc(st.perr)}</p>`:""}
-    <div class="row"><button class="btn primary" data-act="genprac" ${aiReady()?"":"disabled"}>Preparar escucha</button>${aiReady()?"":'<span class="muted">Necesita el tutor IA.</span>'}</div></section>`;
+    <div class="row"><button class="btn primary" data-act="genprac" ${aiReady()?"":"disabled"}>Preparar escucha</button>${aiReady()?"":noAiHTML("Necesita el tutor IA.")}</div></section>`;
   if(!canSpeak) return `<section class="card stack" id="listen"><h2>Escucha</h2><p class="muted">Este navegador no puede leer texto en voz alta. Abrí el curso en Chrome, Edge o Safari para usar la escucha.</p></section>`;
   const L=p.listen, S=st.lis;
   const qs=L.questions.map((x,i)=>{ const a=S.ans[i], cls=S.checked?(a===x.answer?"ok":"bad"):"";
@@ -1387,9 +1389,122 @@ function aiErr(e){
   if(c==="invalid_json") return "La respuesta del tutor llegó incompleta. Tocá el botón otra vez.";
   if(c==="session_expired") return "Tu sesión expiró. Volvé a iniciar sesión en Claude.";
   if(c==="cancelled") return "";
+  if(c==="bad_key") return "Tu clave fue rechazada. Revisala en la sección de clave del tutor IA (tocá «Tutor IA» arriba).";
+  if(c==="no_quota") return "Tu cuenta de "+(KEY_PROV[(keyCfg()||{}).prov]||{}).name+" no tiene saldo o cuota disponible. Revisá la facturación de tu cuenta.";
+  if(c==="bad_model") return "El modelo configurado no existe o tu clave no tiene acceso. Cambialo en la sección de clave del tutor IA.";
+  if(c==="network") return "No se pudo conectar con el proveedor de IA. Revisá tu internet y probá de nuevo.";
   return "El tutor no pudo responder. Probá de nuevo en un momento.";
 }
 const aiReady=()=>SAMPLE&&aiState==="on";
+
+/* ============ CLAVE PROPIA (fuera de claude.ai) ============ */
+// Fuera de claude.ai, cada persona puede pegar su clave de Gemini u OpenAI.
+// La clave queda solo en este navegador y va directo al proveedor.
+// keySample() imita a SAMPLE: sample(input,opts)->{text} y sample.json(prompt,opts)->valor.
+const KEY_LS="rid-aikey";
+const KEY_PROV={
+  gemini:{name:"Google Gemini",keyUrl:"https://aistudio.google.com/app/apikey",keyHint:"Empieza con AIza…",note:"Tiene un plan gratuito; alcanza para practicar."},
+  openai:{name:"OpenAI",keyUrl:"https://platform.openai.com/api-keys",keyHint:"Empieza con sk-…",note:"Es de pago aparte de ChatGPT Plus: la cuenta de la API necesita saldo."}
+};
+function keyCfg(){ const c=lsGet(KEY_LS); return c&&KEY_PROV[c.prov]&&typeof c.key==="string"&&c.key&&typeof c.model==="string"&&c.model?c:null; }
+function aiFail(code,msg){ return {code,message:msg||code}; }
+async function keyFetch(url,init){
+  let res; try{ res=await fetch(url,init); }catch(e){ throw aiFail("network"); }
+  let body=null; try{ body=await res.json(); }catch(e){}
+  if(res.ok) return body;
+  const m=String(body&&body.error&&(body.error.message||body.error.status||body.error.code)||res.status);
+  if(res.status===401||res.status===403||/api[_ ]key|API_KEY_INVALID|incorrect api key/i.test(m)) throw aiFail("bad_key",m);
+  if(res.status===429) throw aiFail(/quota|billing|insufficient/i.test(m)&&!/per minute|rate/i.test(m)?"no_quota":"rate_limited",m);
+  if(res.status===404||/model/i.test(m)&&res.status===400) throw aiFail("bad_model",m);
+  throw aiFail("provider_error",m);
+}
+const toMsgs=input=>typeof input==="string"?[{role:"user",content:input}]:input;
+async function keyCall(c,input,json){
+  const msgs=toMsgs(input);
+  if(c.prov==="gemini"){
+    const body={contents:msgs.map(m=>({role:m.role==="assistant"?"model":"user",parts:[{text:m.content}]}))};
+    if(json) body.generationConfig={responseMimeType:"application/json"};
+    const r=await keyFetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(c.model)}:generateContent`,
+      {method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":c.key},body:JSON.stringify(body)});
+    const cand=r&&r.candidates&&r.candidates[0];
+    const text=(cand&&cand.content&&cand.content.parts||[]).filter(p=>!p.thought).map(p=>p.text||"").join("");
+    if(!text) throw aiFail("provider_error","respuesta vacía");
+    return {text,truncated:cand.finishReason==="MAX_TOKENS"};
+  }
+  const body={model:c.model,messages:(json?[{role:"system",content:"Respond only with valid JSON."}]:[]).concat(msgs)};
+  if(json) body.response_format={type:"json_object"};
+  const r=await keyFetch("https://api.openai.com/v1/chat/completions",
+    {method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+c.key},body:JSON.stringify(body)});
+  const ch=r&&r.choices&&r.choices[0], text=ch&&ch.message&&ch.message.content||"";
+  if(!text) throw aiFail("provider_error","respuesta vacía");
+  return {text,truncated:ch.finish_reason==="length"};
+}
+function keySample(c){
+  const s=async(input,opts={})=>{ const r=await keyCall(c,input,false); if(opts.onText) try{ opts.onText({text:r.text,delta:r.text}); }catch(e){} return r; };
+  s.json=async(input,opts={})=>{
+    const r=await keyCall(c,input,true); if(opts.onText) try{ opts.onText({text:r.text,delta:r.text}); }catch(e){}
+    const t=r.text.trim().replace(/^```(?:json)?\s*/i,"").replace(/```\s*$/,"");
+    try{ return JSON.parse(t); }catch(e){ throw aiFail("invalid_json"); }
+  };
+  return s;
+}
+// Elige un modelo económico de la lista que devuelve el proveedor (los nombres cambian seguido).
+const verNum=s=>(s.match(/\d+(?:\.\d+)?/)||["0"])[0]*1;
+async function pickModel(prov,key){
+  if(prov==="gemini"){
+    const r=await keyFetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",{headers:{"x-goog-api-key":key}});
+    const ids=(r&&r.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes("generateContent")).map(m=>m.name.replace(/^models\//,""));
+    if(ids.includes("gemini-flash-latest")) return "gemini-flash-latest";
+    const fl=ids.filter(i=>/^gemini-\d+(\.\d+)?-flash$/.test(i)).sort((a,b)=>verNum(b)-verNum(a));
+    return fl[0]||ids.find(i=>/flash/.test(i)&&!/image|tts|live|audio|lite/.test(i))||ids[0]||"gemini-flash-latest";
+  }
+  const r=await keyFetch("https://api.openai.com/v1/models",{headers:{"Authorization":"Bearer "+key}});
+  const ids=(r&&r.data||[]).map(m=>m.id);
+  const mini=ids.filter(i=>/^gpt-\d+(\.\d+)?(o)?-mini$/.test(i)).sort((a,b)=>verNum(b)-verNum(a));
+  return mini[0]||(ids.includes("gpt-4o-mini")?"gpt-4o-mini":ids.find(i=>/^gpt-/.test(i))||"gpt-4o-mini");
+}
+let AIK={prov:(keyCfg()||{}).prov||"gemini",key:"",model:"",busy:false,ok:"",err:""};
+function applyKey(){ const c=keyCfg(); if(!INSIDE_CLAUDE&&c){ SAMPLE=keySample(c); aiState="on"; } }
+async function keySave(){
+  const key=AIK.key.trim(); if(!key){ AIK.err="Pegá tu clave primero."; AIK.ok=""; render(); return; }
+  AIK.busy=true; AIK.err=""; AIK.ok=""; render();
+  try{
+    const model=AIK.model.trim()||await pickModel(AIK.prov,key);
+    const c={prov:AIK.prov,key,model};
+    const r=await keyCall(c,"Reply with exactly: OK",false);
+    if(!/ok/i.test(r.text)) throw aiFail("provider_error","respuesta inesperada");
+    lsSet(KEY_LS,c); AIK.key=""; AIK.model=""; applyKey();
+    AIK.ok="¡Listo! La clave funciona. El tutor IA ya está activo con "+KEY_PROV[c.prov].name+" ("+c.model+").";
+  }catch(e){ AIK.err=e&&e.code==="provider_error"?"El proveedor respondió con un error: "+(e.message||""):aiErr(e); }
+  AIK.busy=false; render();
+}
+function keyClear(){ try{ localStorage.removeItem(KEY_LS); }catch(e){} SAMPLE=null; aiState="off"; AIK.ok="Tu clave se borró de este navegador."; AIK.err=""; render(); }
+function vAiKey(){
+  const c=keyCfg(), P_=KEY_PROV[AIK.prov];
+  if(INSIDE_CLAUDE) return `<section class="card stack"><h2>Tutor IA</h2><p>En claude.ai el tutor IA usa tu cuenta de Claude; no hace falta ninguna clave.</p><div class="row"><button class="btn" data-act="go" data-v="home">Volver</button></div></section>`;
+  return `<section class="card stack">
+    <div class="label">Tutor IA con tu propia clave</div><h2>Conectá Gemini u OpenAI</h2>
+    <p>Fuera de claude.ai, el tutor IA (ejercicios nuevos, conversación, correcciones y exámenes) funciona con una clave de API tuya. Cada persona usa y paga su propia clave.</p>
+    ${c?`<div class="note ainote"><b>Clave activa: ${esc(KEY_PROV[c.prov].name)}</b><span class="mono">Modelo ${esc(c.model)} · clave …${esc(c.key.slice(-4))}</span><div class="row"><button class="btn small" data-act="keyclear">Borrar mi clave</button></div></div>`:""}
+    <div class="stack" style="gap:10px">
+      <span class="label">Proveedor</span>
+      <div class="seg" style="justify-self:start" role="group" aria-label="Proveedor de IA">${Object.entries(KEY_PROV).map(([k,v])=>`<button data-act="keyprov" data-p="${k}" aria-pressed="${k===AIK.prov}">${v.name}</button>`).join("")}</div>
+      <p class="muted">${esc(P_.note)} Conseguí tu clave en <a href="${P_.keyUrl}" target="_blank" rel="noopener noreferrer">${esc(P_.keyUrl.replace(/^https:\/\//,""))}</a>.</p>
+      <label class="label" for="aikey-in">Tu clave</label>
+      <input class="fill" id="aikey-in" type="password" value="${esc(AIK.key)}" placeholder="${esc(P_.keyHint)}" autocomplete="off" spellcheck="false" autocapitalize="off">
+      <label class="label" for="aimodel-in">Modelo (opcional)</label>
+      <input class="fill" id="aimodel-in" value="${esc(AIK.model)}" placeholder="Vacío = se elige uno económico automáticamente" autocomplete="off" spellcheck="false" autocapitalize="off">
+      <div class="row"><button class="btn primary" data-act="keysave" ${AIK.busy?"disabled":""}>${AIK.busy?"Probando…":"Probar y guardar"}</button></div>
+      ${AIK.err?`<p class="errtxt">${esc(AIK.err)}</p>`:""}${AIK.ok?`<p><b>${esc(AIK.ok)}</b></p>`:""}
+    </div>
+    <ul class="plain muted">
+      <li>La clave se guarda solo en este navegador y se envía directo a ${esc(P_.name)}; nadie más la recibe.</li>
+      <li>Si usás un computador compartido, tocá «Borrar mi clave» al terminar.</li>
+      <li>No compartas tu clave: quien la tenga puede gastar a tu nombre.</li>
+    </ul>
+  </section>`;
+}
+const noAiHTML=msg=>`<span class="muted">${msg}</span>${INSIDE_CLAUDE?"":'<button class="btn small" data-act="go" data-v="aikey">Usar mi propia clave</button>'}`;
 
 /* ============ PROGRESO ============ */
 const passed=code=>!!(P.levels[code]&&P.levels[code].passed);
@@ -1674,7 +1789,8 @@ function vReview(){
 /* ============ RENDER ============ */
 function renderStatus(){
   const bd=$("#rv-badge"); if(bd){ const n=srsDue().length; bd.textContent=n>99?"99+":String(n); bd.hidden=!n; }
-  const ai = aiState==="on"?'<span class="pill ok" title="Tutor IA activo"><i></i>Tutor IA</span>':aiState==="wait"?'<span class="pill" title="Conectando con el tutor IA"><i></i>Conectando…</span>':'<span class="pill warn" title="Tutor IA no disponible"><i></i>Sin tutor IA</span>';
+  let ai = aiState==="on"?'<span class="pill ok" title="Tutor IA activo"><i></i>Tutor IA</span>':aiState==="wait"?'<span class="pill" title="Conectando con el tutor IA"><i></i>Conectando…</span>':'<span class="pill warn" title="Tutor IA no disponible"><i></i>Sin tutor IA</span>';
+  if(!INSIDE_CLAUDE) ai=ai.replace('<span class="pill','<button type="button" data-act="go" data-v="aikey" class="pill pillbtn').replace('</span>','</button>').replace(/title="[^"]*"/,'title="Configurar tu clave del tutor IA"');
   const sy = syncState==="ok"?'<span class="pill acc" title="Tu progreso se guarda en tu cuenta"><i></i>Guardado</span>':syncState==="err"?'<span class="pill bad" title="No se pudo guardar en tu cuenta"><i></i>Error al guardar</span>':'<span class="pill" title="El progreso se guarda solo en este navegador"><i></i>Solo local</span>';
   $("#status").innerHTML=ai+sy;
   const sp=$("#speed"); if(sp) sp.innerHTML=canSpeak?`<span class="label">Voz</span><div class="seg" role="group" aria-label="Velocidad de la voz">${RATES.map(x=>`<button data-act="rate" data-k="${x.k}" aria-pressed="${x.k===RATE_K}">${x.l}</button>`).join("")}</div>`:"";
@@ -1684,7 +1800,7 @@ const INSIDE_CLAUDE=!!(window.claude&&window.claude.use);
 function aiHelpHTML(){
   if(aiState==="wait") return `<p class="muted">Conectando con el tutor IA…</p>`;
   if(aiReady()) return "";
-  if(!INSIDE_CLAUDE) return `<div class="note ainote"><b>El tutor IA solo funciona desde claude.ai.</b><span>Estás abriendo el archivo curso-ingles.html directamente en el navegador. Abrí el enlace del curso (está en enlace.txt) con tu cuenta de Claude iniciada.</span></div>`;
+  if(!INSIDE_CLAUDE) return `<div class="note ainote"><b>El tutor IA necesita Claude o tu propia clave.</b><span>Abrí el enlace del curso en claude.ai con tu cuenta de Claude, o conectá tu clave de Gemini u OpenAI.</span><div class="row"><button class="btn small" data-act="go" data-v="aikey">Usar mi propia clave</button></div></div>`;
   return `<div class="note ainote"><b>El tutor IA no está habilitado en esta vista.</b><span>Probablemente se rechazó el permiso para que el curso use Claude. Revisá los permisos, activá Claude y volvé a tocar el botón. Si no aparece, recargá la página.</span><div class="row"><button class="btn small" data-act="permmanage">Revisar permisos</button></div></div>`;
 }
 async function openPerms(){
@@ -1693,7 +1809,7 @@ async function openPerms(){
 }
 function render(){
   document.querySelectorAll("#tabs button").forEach(b=>b.setAttribute("aria-current", (b.dataset.v===view.name||(view.name==="lesson"||view.name==="exam")&&b.dataset.v==="route")?"page":"false"));
-  const fn={home:vHome,route:vRoute,lesson:vLesson,exam:vExam,talk:vTalk,plan:vPlan,review:vReview}[view.name]||vHome;
+  const fn={home:vHome,route:vRoute,lesson:vLesson,exam:vExam,talk:vTalk,plan:vPlan,review:vReview,aikey:vAiKey}[view.name]||vHome;
   $("#main").innerHTML=fn();
   renderStatus();
   if(view.name==="review"){ const i=$("#rv-in"); if(i&&!i.disabled&&matchMedia("(pointer:fine)").matches) i.focus(); }
@@ -1829,7 +1945,7 @@ function vLesson(){
   if(!st.lesson) return head+`<section class="card stack"><h3>Esta lección la prepara el tutor IA</h3>
     <p class="muted" style="max-width:68ch">El tutor genera la explicación, el vocabulario, un diálogo, 10 ejercicios y la consigna de escritura para tu nivel. Queda guardada, así que solo se genera una vez.</p>
     ${st.err?`<p class="errtxt">${esc(st.err)}</p>`:""}
-    <div class="row"><button class="btn primary" data-act="gen" ${aiReady()?"":"disabled"}>Preparar lección</button>${aiReady()?"":'<span class="muted">El tutor IA no está disponible en esta vista.</span>'}</div></section>`;
+    <div class="row"><button class="btn primary" data-act="gen" ${aiReady()?"":"disabled"}>Preparar lección</button>${aiReady()?"":noAiHTML("El tutor IA no está disponible en esta vista.")}</div></section>`;
   const l=st.lesson, k="L";
   const QS=quizScore(k,lessonExs(st),st.ans);
   const vf=l.verified&&Array.isArray(l.verified.fixes)?l.verified.fixes:null;
@@ -2025,7 +2141,7 @@ function vExam(){
     <h1>Examen ${L.code} · ${L.name}</h1><p class="muted" style="max-width:68ch">20 preguntas (70% de la nota) y una escritura (30%). Con ${EXAM_PASS} o más aprobás el nivel ${L.code}${LEVELS[levelIdx(L.code)+1]?" y se desbloquea "+LEVELS[levelIdx(L.code)+1].code:""}. Cada vez que lo generás, las preguntas son distintas.</p>
     ${passed(L.code)?`<span class="pill ok"><i></i>Ya aprobado con ${P.levels[L.code].score}</span>`:""}</section>`;
   if(st.busy==="gen") return head+`<section class="card"><div class="thinking"><span class="dot"></span>El tutor está armando tu examen… <span class="mono" id="exlive">${st.live.length} caracteres</span></div></section>`;
-  if(!st.exam) return head+`<section class="card stack">${st.err?`<p class="errtxt">${esc(st.err)}</p>`:""}<div class="row"><button class="btn primary" data-act="genexam" ${aiReady()?"":"disabled"}>Generar examen</button>${aiReady()?"":'<span class="muted">El examen necesita el tutor IA.</span>'}</div></section>`;
+  if(!st.exam) return head+`<section class="card stack">${st.err?`<p class="errtxt">${esc(st.err)}</p>`:""}<div class="row"><button class="btn primary" data-act="genexam" ${aiReady()?"":"disabled"}>Generar examen</button>${aiReady()?"":noAiHTML("El examen necesita el tutor IA.")}</div></section>`;
   const ex=st.exam;
   return head+`<section class="card stack"><h2>Preguntas</h2><ol class="exs" id="ex-E">${exHTML(ex.questions,{ans:st.ans,checked:!!st.result},"E")}</ol></section>
   <section class="card stack"><h2>Escritura</h2><p>${esc(ex.writing.task)}</p><span class="mono muted">Mínimo ${ex.writing.minWords} palabras</span>
@@ -2299,6 +2415,9 @@ const actions={
   // Si el permiso se rechazó antes, otro intento vuelve a pedirlo.
   tstart:()=>{ if(SAMPLE){ aiState="on"; talkCall(); return; } TST.err=INSIDE_CLAUDE?"El tutor IA no está disponible en esta vista. Recargá la página y aceptá el permiso cuando te lo pida.":"El tutor IA solo funciona desde el enlace de claude.ai."; render(); },
   permmanage:()=>openPerms(),
+  keyprov:d=>{ if(AIK.busy) return; AIK.prov=d.p; AIK.model=""; AIK.err=""; AIK.ok=""; render(); },
+  keysave:()=>keySave(),
+  keyclear:()=>keyClear(),
   tmode:d=>{ TVOICE=d.m==="voice"; try{ localStorage.setItem("rid-talk-voice",TVOICE?"1":"0"); }catch(e){} if(!TVOICE){ stopSpeech(); } render(); },
   tmic:()=>talkMic(),
   rate:d=>{ RATE_K=d.k; try{ localStorage.setItem("rid-rate",d.k); }catch(e){} renderStatus(); speak("This is the "+({slow:"slow",normal:"normal",fast:"fast"}[d.k])+" speed."); },
@@ -2332,7 +2451,10 @@ document.addEventListener("input",e=>{
   if(t.id==="talk-in") TST.draft=t.value;
   if(t.id==="rep-note") RPT.draft=t.value;
   if(t.id==="rv-in"&&RV) RV.input=t.value;
+  if(t.id==="aikey-in") AIK.key=t.value;
+  if(t.id==="aimodel-in") AIK.model=t.value;
 });
+document.addEventListener("keydown",e=>{ if((e.target.id==="aikey-in"||e.target.id==="aimodel-in")&&e.key==="Enter"&&!AIK.busy){ e.preventDefault(); keySave(); } });
 document.addEventListener("keydown",e=>{ if(e.target.id==="talk-in"&&e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); talkSend(); } });
 // Atajos del repaso: Espacio / Enter para mostrar o comprobar, 1-2-3 para calificar.
 document.addEventListener("keydown",e=>{
@@ -2350,7 +2472,7 @@ async function init(){
   const lr=lsGet(RLS); if(Array.isArray(lr)) REPORTS=lr;
   const ls=lsGet(SRS_LS); if(ls&&typeof ls==="object"&&!Array.isArray(ls)) SRS=ls;
   render();
-  if(!window.claude||!window.claude.use){ aiState="off"; renderStatus(); srsBackfill(); return; }
+  if(!window.claude||!window.claude.use){ aiState="off"; applyKey(); render(); srsBackfill(); return; }
   const [u,db,s]=await Promise.all([claude.use("user").catch(()=>null),claude.use("db").catch(()=>null),claude.use("sample").catch(()=>null)]);
   SAMPLE=s; aiState=s?"on":"off";
   if(u&&db){
