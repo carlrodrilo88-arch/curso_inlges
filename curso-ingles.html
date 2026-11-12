@@ -1091,28 +1091,55 @@ function voiceFor(who){
    Así no se cortan los textos largos ni se pierden frases después de detener otro audio. */
 const SP={id:0,keep:null};
 function stopSpeech(){ SP.id++; SP.keep=null; try{ speechSynthesis.cancel(); }catch(e){} }
-const splitSent=t=>{ const m=String(t||"").match(/[^.!?]+[.!?]*["')]*/g); return (m||[String(t||"")]).map(s=>s.trim()).filter(Boolean); };
+// Una línea corta se dice en un solo audio. Los textos largos se agrupan por oraciones en trozos de hasta ~180 letras.
+const splitSent=t=>{
+  const s=String(t||"").trim(); if(s.length<=180) return s?[s]:[];
+  const m=(s.match(/[^.!?]+[.!?]*["')]*/g)||[s]).map(x=>x.trim()).filter(Boolean), out=[];
+  m.forEach(x=>{ if(out.length&&(out[out.length-1]+" "+x).length<=180) out[out.length-1]+=" "+x; else out.push(x); });
+  return out;
+};
 function playQueue(items,opt){
   opt=opt||{};
   if(!canSpeak){ if(opt.onfail) opt.onfail(); return; }
   stopSpeech(); const id=SP.id, q=[];
   items.forEach(it=>splitSent(it.text).forEach(s=>q.push({text:s,who:it.who||"A",rate:it.rate,plain:false})));
   let i=0, started=false;
+  // Cuenta como "empezó" tanto el aviso onstart como ver al sintetizador hablando:
+  // en algunos Chrome/Edge onstart no llega aunque el audio suena.
+  const markStart=()=>{ if(!started&&id===SP.id){ started=true; if(opt.onstart) opt.onstart(); } };
   const next=()=>{
     if(id!==SP.id) return;
     if(i>=q.length){ SP.keep=null; if(opt.onend) opt.onend(); return; }
     const c=q[i++], u=new SpeechSynthesisUtterance(c.text), v=voiceFor(c.who);
     if(v.voice&&!c.plain){ u.voice=v.voice; u.lang=v.voice.lang; } else u.lang="en-US";
     u.pitch=c.plain?1:v.pitch; u.rate=c.rate||rateNow();
-    u.onstart=()=>{ if(!started&&id===SP.id){ started=true; if(opt.onstart) opt.onstart(); } };
-    u.onend=()=>{ if(id===SP.id) setTimeout(next,(q[i]&&q[i].who!==c.who)?280:90); };
+    // Cada frase avanza una sola vez: por su aviso de fin, por error o por el vigilante.
+    let done=false, heard=false, quiet=0;
+    const finish=ms=>{ if(done) return; done=true; clearInterval(dog); if(id===SP.id) setTimeout(next,ms); };
+    u.onstart=()=>{ heard=true; markStart(); };
+    u.onend=()=>finish((q[i]&&q[i].who!==c.who)?280:90);
     u.onerror=e=>{
-      if(id!==SP.id||e.error==="interrupted"||e.error==="canceled") return;
-      if(!c.plain){ c.plain=true; i--; }   // si la voz elegida falla, repite la frase con la voz por defecto
-      setTimeout(next,90);
+      if(id!==SP.id||e.error==="canceled"){ done=true; clearInterval(dog); return; }
+      if(e.error!=="interrupted"&&!c.plain&&!heard){ c.plain=true; i--; }   // si la voz elegida falla, repite la frase con la voz por defecto
+      finish(90);
     };
+    // Vigilante: a veces Chrome y Edge no avisan que terminó una frase y la cola se quedaba trabada.
+    // Si ya empezó a hablar y el sintetizador quedó en silencio un momento, pasa a la siguiente.
+    // Además, a veces el navegador queda "hablando" para siempre sin avisar el fin (speaking=true trabado):
+    // si la frase supera con margen lo que debería durar, se corta y se sigue con la próxima.
+    const t0=Date.now(), maxMs=2500+c.text.length*1000/(9*(u.rate||1)), dog=setInterval(()=>{
+      if(id!==SP.id){ clearInterval(dog); return; }
+      let busy=true, talking=false; try{ talking=speechSynthesis.speaking; busy=talking||speechSynthesis.pending; }catch(e){}
+      if(Date.now()-t0>maxMs){
+        if(!heard&&!c.plain){ c.plain=true; i--; }
+        done=true; clearInterval(dog); try{ speechSynthesis.cancel(); }catch(e){} if(id===SP.id) setTimeout(next,200); return;
+      }
+      if(busy){ quiet=0; if(talking){ heard=true; markStart(); } return; }
+      if(heard){ if(++quiet>=3) finish(90); }
+      else if(Date.now()-t0>4000){ if(!c.plain){ c.plain=true; i--; } done=true; clearInterval(dog); try{ speechSynthesis.cancel(); }catch(e){} if(id===SP.id) setTimeout(next,150); }
+    },200);
     SP.keep=u; // mantiene viva la frase: si el navegador la descarta, no avisa cuando termina
-    try{ speechSynthesis.resume(); speechSynthesis.speak(u); }catch(e){ if(opt.onfail) opt.onfail(); }
+    try{ speechSynthesis.resume(); speechSynthesis.speak(u); }catch(e){ clearInterval(dog); if(opt.onfail) opt.onfail(); }
   };
   setTimeout(next,150); // justo después de cancel(), Chrome ignora lo que se le pide
   setTimeout(()=>{ if(id===SP.id&&!started&&opt.onfail) opt.onfail(); },4500);
