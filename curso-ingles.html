@@ -267,6 +267,29 @@ details.fixes summary{cursor:pointer;font-weight:700}
 .hello{font-family:var(--f-display);font-weight:800;font-size:clamp(1.7rem,4vw,2.4rem);line-height:1.15}
 .hero h2{font-size:1.3rem}
 .ainote{display:grid;gap:8px}
+/* accesos rápidos dentro de la lección */
+.jump{display:flex;gap:6px;flex-wrap:wrap}
+.jump button{font-size:.8rem;padding:4px 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface);cursor:pointer;color:var(--ink)}
+.jump button:hover{border-color:var(--accent);color:var(--accent)}
+main section{scroll-margin-top:84px}
+@media (min-width:641px){nav.tabs{min-width:max-content;overflow:visible}}
+/* celular: menú fijo abajo, barra de arriba que no ocupa pantalla y menos relleno */
+@media (max-width:640px){
+  header.top{position:static}
+  nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:6;display:grid;grid-template-columns:repeat(5,1fr);gap:2px;
+    background:var(--surface);border-top:1px solid var(--line);box-shadow:0 -2px 10px rgba(0,0,0,.06);
+    padding:6px max(6px,env(safe-area-inset-right,0px)) calc(6px + env(safe-area-inset-bottom,0px)) max(6px,env(safe-area-inset-left,0px));overflow:visible}
+  nav.tabs button{padding:10px 2px;font-size:.8rem;text-align:center;position:relative}
+  nav.tabs .badge{position:absolute;top:2px;right:2px}
+  nav.tabs .tab-x{display:none}
+  body{padding-bottom:calc(64px + env(safe-area-inset-bottom,0px))}
+  main{padding-block:18px 32px;gap:20px}
+  main section{scroll-margin-top:12px}
+  .card{padding:16px}
+  .voc li{padding:10px 12px}
+  .jump{flex-wrap:nowrap;overflow-x:auto;padding-bottom:2px;margin-inline:-16px;padding-inline:16px;scrollbar-width:none}
+  .jump button{flex:none;padding:6px 12px}
+}
 </style>
 
 <header class="top">
@@ -274,7 +297,7 @@ details.fixes summary{cursor:pointer;font-weight:700}
     <div class="brand"><span class="logo">EN</span><span class="name">Ruta Inglés Dev</span></div>
     <nav class="tabs" id="tabs">
       <button data-act="go" data-v="home">Inicio</button>
-      <button data-act="go" data-v="route">Ruta A1–C2</button>
+      <button data-act="go" data-v="route">Ruta<span class="tab-x"> A1–C2</span></button>
       <button data-act="go" data-v="review">Repaso<span class="badge" id="rv-badge" hidden></span></button>
       <button data-act="go" data-v="talk">Conversar</button>
       <button data-act="go" data-v="plan">Mi plan</button>
@@ -1965,6 +1988,7 @@ function vLesson(){
     <div class="focus"><div><span class="label">Gramática</span><br>${esc(u.g)}</div><div><span class="label">Vocabulario</span><br>${esc(u.v)}</div><div><span class="label">Tech</span><br>${esc(u.tech)}</div><div><span class="label">Conversación</span><br>${esc(u.talk)}</div></div>
     <div class="row"><span class="pill ${(s.quiz||0)>=QUIZ_PASS?"ok":""}">Ejercicios: ${s.quiz!=null?s.quiz+"%":"—"} (mín. ${QUIZ_PASS})</span><span class="pill ${(s.writing||0)>=WRITE_PASS?"ok":""}">Escritura: ${s.writing!=null?s.writing:"—"} (mín. ${WRITE_PASS})</span>${s.done?'<span class="pill ok"><i></i>Unidad completa</span>':""}${st.lesson&&!st.busy?originPill(u.id,st.lesson):""}</div>
     <div class="row"><span class="pill ${s.listen!=null?"acc":""}">Escucha: ${s.listen!=null?s.listen+"%":"—"}</span><span class="pill ${s.speak!=null?"acc":""}">Pronunciación: ${s.speak!=null?s.speak+"%":"—"}</span><span class="muted" style="font-size:.85rem">Práctica extra: no cambia si la unidad se completa</span></div>
+    ${st.lesson?`<nav class="jump" aria-label="Ir a una sección">${["Vocabulario","Diálogo","Ejercicios","Escucha","Pronunciación","Escritura"].map(h=>`<button data-act="jump" data-h="${h}">${h}</button>`).join("")}</nav>`:""}
   </section>`;
   if(st.lesson===undefined) return head+`<div class="thinking"><span class="dot"></span>Cargando la lección…</div>`;
   if(st.busy==="gen") return head+`<section class="card stack"><div class="thinking"><span class="dot"></span>El tutor está preparando tu lección. Puede tardar hasta un minuto.</div>${st.live?`<span class="mono muted">${st.live.length} caracteres escritos…</span>`:""}</section>`;
@@ -2412,6 +2436,7 @@ const actions={
   exam:d=>go("exam",{level:d.l}),
   say:d=>speak(d.t,d.r?+d.r:undefined),
   hush:()=>{ stopSpeech(); },
+  jump:d=>{ const h=[...document.querySelectorAll("#main h2")].find(x=>x.textContent.trim()===d.h); const s=h&&h.closest("section"); if(s) s.scrollIntoView({behavior:"smooth",block:"start"}); },
   genprac:()=>genPractice(),
   lplay:d=>{ const st=LST; if(!st||!st.practice) return; const el=()=>$("#lplays");
     if(el()) el().textContent="Preparando el audio…";
